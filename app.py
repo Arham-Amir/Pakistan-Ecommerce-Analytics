@@ -110,18 +110,35 @@ div[data-testid="stPlotlyChart"] {
 # 3. LOAD DATA
 # ==========================================
 
+REQUIRED_COLUMNS = [
+    "created_at", "status", "sku", "increment_id", "category_name_1",
+    "payment_method", "Customer ID", "qty_ordered", "item_total_value"
+]
+
+
+def _norm(name):
+    return str(name).strip().lower().replace(" ", "_")
+
+
 @st.cache_data(show_spinner="Loading dataset...")
 def load_data():
 
     data = pd.read_csv(
         "pakistan_ecommerce_cleaned.csv.gz",
         compression="gzip",
-        low_memory=False,
-        dtype={"increment_id": "string"}
+        low_memory=False
     )
 
     # Column names ke aage peeche ke spaces hata do (e.g. " MV " -> "MV")
-    data.columns = data.columns.str.strip()
+    data.columns = data.columns.astype(str).str.strip()
+
+    # Naam ka chota-bara farq / space ka farq khud theek karo
+    existing = {_norm(c): c for c in data.columns}
+    rename_map = {}
+    for required in REQUIRED_COLUMNS:
+        if required not in data.columns and _norm(required) in existing:
+            rename_map[existing[_norm(required)]] = required
+    data = data.rename(columns=rename_map)
 
     # Mixed-type (object) columns ko string bana do taake Arrow error na aaye
     for column in data.columns:
@@ -129,23 +146,33 @@ def load_data():
             data[column] = data[column].astype("string")
 
     # Date column
-    data["created_at"] = pd.to_datetime(
-        data["created_at"],
-        errors="coerce"
-    )
+    if "created_at" in data.columns:
+        data["created_at"] = pd.to_datetime(
+            data["created_at"],
+            errors="coerce"
+        )
 
     # Numeric columns
     for column in ["qty_ordered", "item_total_value"]:
-        data[column] = pd.to_numeric(data[column], errors="coerce")
+        if column in data.columns:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
 
     # Memory bachane ke liye low-cardinality columns ko category bana do
     for column in ["status", "category_name_1", "payment_method"]:
-        data[column] = data[column].astype("category")
+        if column in data.columns:
+            data[column] = data[column].astype("category")
 
     return data
 
 
 df = load_data()
+
+missing_columns = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+
+if missing_columns:
+    st.error(f"Dataset mein ye columns nahi mile: {missing_columns}")
+    st.write("Dataset ke asal columns:", list(df.columns))
+    st.stop()
 
 
 # ==========================================
