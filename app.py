@@ -113,8 +113,9 @@ div[data-testid="stPlotlyChart"] {
 @st.cache_data
 def load_data():
 
-    data = pd.read_csv("pakistan_ecommerce_cleaned.csv.gz", compression="gzip")
+    data = pd.read_csv("pakistan_ecommerce_cleaned.csv.gz", compression="gzip", low_memory=False)
 
+    data["increment_id"] = data["increment_id"].astype("string")
 
     data["created_at"] = pd.to_datetime(
         data["created_at"], errors="coerce"
