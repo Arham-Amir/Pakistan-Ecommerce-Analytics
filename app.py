@@ -119,55 +119,65 @@ def _norm(name):
     return str(name).strip().lower().replace(" ", "_")
 
 
-@st.cache_data(show_spinner="Loading dataset...")
+USE_COLUMNS = [
+    "status", "created_at", "sku", "price", "qty_ordered", "discount_amount",
+    "increment_id", "category_name_1", "payment_method", "Customer ID"
+]
+
+CATEGORY_COLUMNS = [
+    "status", "sku", "increment_id", "category_name_1",
+    "payment_method", "Customer ID"
+]
+
+
+# cache_resource: data ki copy har rerun par nahi banti (memory bachti hai)
+@st.cache_resource(show_spinner="Loading dataset...")
 def load_data():
 
+    wanted = {_norm(c) for c in USE_COLUMNS}
+
+    # Sirf zaroori columns, aur text columns seedha category type mein
     data = pd.read_csv(
         "pakistan_ecommerce_cleaned.csv.gz",
         compression="gzip",
-        low_memory=False
+        usecols=lambda c: _norm(c) in wanted,
+        dtype={
+            "status": "category",
+            "sku": "category",
+            "increment_id": "category",
+            "category_name_1": "category",
+            "payment_method": "category",
+            "Customer ID": "category",
+            "created_at": "str",
+        },
     )
 
-    # Column names ke aage peeche ke spaces hata do (e.g. " MV " -> "MV")
     data.columns = data.columns.astype(str).str.strip()
 
-    # Naam ka chota-bara farq / space ka farq khud theek karo
     existing = {_norm(c): c for c in data.columns}
     rename_map = {}
-    for required in REQUIRED_COLUMNS:
+    for required in USE_COLUMNS:
         if required not in data.columns and _norm(required) in existing:
             rename_map[existing[_norm(required)]] = required
     data = data.rename(columns=rename_map)
 
-    # Mixed-type (object) columns ko string bana do taake Arrow error na aaye
-    for column in data.columns:
-        if data[column].dtype == "object":
-            data[column] = data[column].astype("string")
-
-    # Date column
     if "created_at" in data.columns:
         data["created_at"] = pd.to_datetime(
             data["created_at"],
             errors="coerce"
         )
 
-    # Khaali "Unnamed: xx" columns hata do
-    data = data.loc[:, ~data.columns.str.startswith("Unnamed")]
-
-    # Numeric columns
-    for column in ["price", "qty_ordered", "discount_amount", "item_total_value"]:
+    for column in ["price", "qty_ordered", "discount_amount"]:
         if column in data.columns:
-            data[column] = pd.to_numeric(data[column], errors="coerce")
+            data[column] = pd.to_numeric(
+                data[column], errors="coerce"
+            ).astype("float32")
 
-    # item_total_value CSV mein nahi hai, to price x quantity se bana lo
-    if "item_total_value" not in data.columns \
-            and {"price", "qty_ordered"}.issubset(data.columns):
-        data["item_total_value"] = data["price"] * data["qty_ordered"]
-
-    # Memory bachane ke liye low-cardinality columns ko category bana do
-    for column in ["status", "category_name_1", "payment_method"]:
-        if column in data.columns:
-            data[column] = data[column].astype("category")
+    # CSV mein item_total_value nahi hai, to price x quantity se bana lo
+    if {"price", "qty_ordered"}.issubset(data.columns):
+        data["item_total_value"] = (
+            data["price"] * data["qty_ordered"]
+        ).astype("float32")
 
     return data
 
@@ -203,7 +213,6 @@ def format_value(value):
     return f"Rs. {value:,.0f}"
 
 
-@st.cache_data(show_spinner=False)
 def to_csv_bytes(frame):
     return frame.to_csv(index=False).encode("utf-8")
 
@@ -228,8 +237,8 @@ if valid_dates.empty:
 min_date = valid_dates.min().date()
 max_date = valid_dates.max().date()
 
-categories = sorted(df["category_name_1"].dropna().astype(str).unique())
-payments = sorted(df["payment_method"].dropna().astype(str).unique())
+categories = sorted(df["category_name_1"].cat.categories.astype(str))
+payments = sorted(df["payment_method"].cat.categories.astype(str))
 
 # Default values session_state mein set karo (reset button isi se kaam karega)
 if "date_range" not in st.session_state:
@@ -319,7 +328,7 @@ if only_complete:
     ]
     mask &= df["status"].isin(good_statuses)
 
-filtered_df = df[mask]
+filtered_df = df if mask.all() else df[mask]
 
 if subtract_discount and "discount_amount" in filtered_df.columns:
     filtered_df = filtered_df.assign(
@@ -408,14 +417,18 @@ st.divider()
 # 9. PREPARE CHART DATA
 # ==========================================
 
+_monthly = filtered_df[["created_at", "item_total_value"]].dropna(
+    subset=["created_at"]
+)
+
 monthly_data = (
-    filtered_df.dropna(subset=["created_at"])
-    .assign(Month=lambda d: d["created_at"].dt.to_period("M").astype(str))
-    .groupby("Month")["item_total_value"]
+    _monthly.groupby(_monthly["created_at"].dt.to_period("M"))["item_total_value"]
     .sum()
     .reset_index()
-    .sort_values("Month")
+    .rename(columns={"created_at": "Month"})
 )
+monthly_data["Month"] = monthly_data["Month"].astype(str)
+monthly_data = monthly_data.sort_values("Month")
 
 category_data = (
     filtered_df.groupby("category_name_1", observed=True)["item_total_value"]
@@ -424,11 +437,12 @@ category_data = (
     .sort_values("item_total_value", ascending=True)
 )
 
+_product_base = filtered_df[["sku", "qty_ordered", "item_total_value"]]
+_product_base = _product_base[~_product_base["sku"].isin(["Unknown", r"\N"])]
+
 product_data = (
-    filtered_df[
-        ~filtered_df["sku"].isin(["Unknown", r"\N"])
-    ]
-    .groupby("sku")
+    _product_base
+    .groupby("sku", observed=True)
     .agg(
         Total_Quantity=("qty_ordered", "sum"),
         Recorded_Value=("item_total_value", "sum")
@@ -766,14 +780,16 @@ with tab4:
 
     if search_text:
 
-        table_df = table_df[
-            table_df["sku"].astype(str).str.contains(
+        sku_categories = df["sku"].cat.categories
+        matching_skus = sku_categories[
+            sku_categories.astype(str).str.contains(
                 search_text,
                 case=False,
                 na=False,
                 regex=False
             )
         ]
+        table_df = table_df[table_df["sku"].isin(matching_skus)]
 
     MAX_ROWS = 1000
 
@@ -790,7 +806,16 @@ with tab4:
     )
 
     # CSV sirf tab banao jab user chahe (memory bachane ke liye)
-    if st.checkbox("Prepare full filtered dataset for download"):
+    MAX_DOWNLOAD_ROWS = 200_000
+
+    if len(table_df) > MAX_DOWNLOAD_ROWS:
+
+        st.info(
+            f"Download ke liye records bohat zyada hain ({len(table_df):,}). "
+            f"Filters ya search se {MAX_DOWNLOAD_ROWS:,} se kam records karein."
+        )
+
+    elif st.checkbox("Prepare filtered dataset for download"):
 
         st.download_button(
             "📥 Download Filtered Dataset",
