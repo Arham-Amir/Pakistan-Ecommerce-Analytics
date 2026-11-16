@@ -155,7 +155,7 @@ def load_data():
     data = data.loc[:, ~data.columns.str.startswith("Unnamed")]
 
     # Numeric columns
-    for column in ["price", "qty_ordered", "item_total_value"]:
+    for column in ["price", "qty_ordered", "discount_amount", "item_total_value"]:
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")
 
@@ -246,6 +246,8 @@ def reset_filters():
     st.session_state["date_range"] = (min_date, max_date)
     st.session_state["selected_categories"] = categories
     st.session_state["selected_payments"] = payments
+    st.session_state["only_complete"] = False
+    st.session_state["subtract_discount"] = False
 
 
 date_range = st.sidebar.date_input(
@@ -265,6 +267,22 @@ selected_payments = st.sidebar.multiselect(
     "Payment Methods",
     payments,
     key="selected_payments"
+)
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Value Options")
+
+only_complete = st.sidebar.checkbox(
+    "Only Complete & Received orders",
+    key="only_complete",
+    help="Cancelled, refunded aur returned orders hata deta hai."
+)
+
+subtract_discount = st.sidebar.checkbox(
+    "Subtract discount from value",
+    key="subtract_discount",
+    help="Value = (Price x Quantity) - Discount"
 )
 
 st.sidebar.divider()
@@ -294,7 +312,35 @@ if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
 
     mask &= (df["created_at"] >= start_ts) & (df["created_at"] < end_ts)
 
+if only_complete:
+    good_statuses = [
+        s for s in df["status"].cat.categories
+        if str(s).strip().lower() in ("complete", "received")
+    ]
+    mask &= df["status"].isin(good_statuses)
+
 filtered_df = df[mask]
+
+if subtract_discount and "discount_amount" in filtered_df.columns:
+    filtered_df = filtered_df.assign(
+        item_total_value=(
+            filtered_df["item_total_value"]
+            - filtered_df["discount_amount"].fillna(0)
+        ).clip(lower=0)
+    )
+
+# Captions ke liye dynamic note
+if subtract_discount:
+    value_note = "Recorded Product Value = (Price × Quantity) − Discount."
+else:
+    value_note = "Recorded Product Value = Price × Quantity."
+
+if only_complete:
+    value_note += " Only Complete & Received orders are included."
+else:
+    value_note += " Cancelled/refunded orders are also included."
+
+value_note += " It is not verified collected revenue or profit."
 
 if filtered_df.empty:
     st.warning("No data available for selected filters.")
@@ -353,10 +399,7 @@ col4.metric("Products Quantity", f"{total_quantity:,.0f}")
 col5.metric("Recorded Product Value", format_value(total_value))
 col6.metric("Average Value / Order", format_value(average_order_value))
 
-st.caption(
-    "Note: Recorded Product Value = Price × Quantity. "
-    "It is not verified collected revenue or profit."
-)
+st.caption(f"Note: {value_note}")
 
 st.divider()
 
@@ -551,7 +594,7 @@ with tab1:
 
     st.caption(
         "Insights are dynamically calculated from the currently selected filters. "
-        "Product value represents price × quantity, not verified revenue."
+        "Product value is not verified revenue."
     )
 
 
