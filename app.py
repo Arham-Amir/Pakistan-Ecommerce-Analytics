@@ -106,15 +106,13 @@ div[data-testid="stPlotlyChart"] {
 """, unsafe_allow_html=True)
 
 
-
 # ==========================================
 # 3. LOAD DATA
 # ==========================================
 
-@st.cache_data
+@st.cache_data(show_spinner="Loading dataset...")
 def load_data():
 
-    # Load compressed dataset from GitHub
     data = pd.read_csv(
         "pakistan_ecommerce_cleaned.csv.gz",
         compression="gzip",
@@ -122,30 +120,27 @@ def load_data():
         dtype={"increment_id": "string"}
     )
 
-    # Convert all mixed object columns into strings
-    # This prevents Streamlit / PyArrow conversion errors
-    object_columns = data.select_dtypes(include=["object"]).columns
+    # Column names ke aage peeche ke spaces hata do (e.g. " MV " -> "MV")
+    data.columns = data.columns.str.strip()
 
-    for column in object_columns:
-        data[column] = data[column].astype("string")
+    # Mixed-type (object) columns ko string bana do taake Arrow error na aaye
+    for column in data.columns:
+        if data[column].dtype == "object":
+            data[column] = data[column].astype("string")
 
-    # Convert date column
+    # Date column
     data["created_at"] = pd.to_datetime(
         data["created_at"],
         errors="coerce"
     )
 
-    # Ensure important numeric columns are numeric
-    numeric_columns = [
-        "qty_ordered",
-        "item_total_value"
-    ]
+    # Numeric columns
+    for column in ["qty_ordered", "item_total_value"]:
+        data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    for column in numeric_columns:
-        data[column] = pd.to_numeric(
-            data[column],
-            errors="coerce"
-        )
+    # Memory bachane ke liye low-cardinality columns ko category bana do
+    for column in ["status", "category_name_1", "payment_method"]:
+        data[column] = data[column].astype("category")
 
     return data
 
@@ -153,12 +148,14 @@ def load_data():
 df = load_data()
 
 
-
 # ==========================================
-# 4. HELPER FUNCTION
+# 4. HELPER FUNCTIONS
 # ==========================================
 
 def format_value(value):
+
+    if pd.isna(value):
+        return "Rs. 0"
 
     if value >= 1_000_000_000:
         return f"Rs. {value / 1_000_000_000:.2f}B"
@@ -170,6 +167,11 @@ def format_value(value):
         return f"Rs. {value / 1_000:.2f}K"
 
     return f"Rs. {value:,.0f}"
+
+
+@st.cache_data(show_spinner=False)
+def to_csv_bytes(frame):
+    return frame.to_csv(index=False).encode("utf-8")
 
 
 # ==========================================
@@ -192,61 +194,73 @@ if valid_dates.empty:
 min_date = valid_dates.min().date()
 max_date = valid_dates.max().date()
 
+categories = sorted(df["category_name_1"].dropna().astype(str).unique())
+payments = sorted(df["payment_method"].dropna().astype(str).unique())
+
+# Default values session_state mein set karo (reset button isi se kaam karega)
+if "date_range" not in st.session_state:
+    st.session_state["date_range"] = (min_date, max_date)
+
+if "selected_categories" not in st.session_state:
+    st.session_state["selected_categories"] = categories
+
+if "selected_payments" not in st.session_state:
+    st.session_state["selected_payments"] = payments
+
+
+def reset_filters():
+    st.session_state["date_range"] = (min_date, max_date)
+    st.session_state["selected_categories"] = categories
+    st.session_state["selected_payments"] = payments
+
+
 date_range = st.sidebar.date_input(
     "Select Date Range",
-    value=(min_date, max_date),
     min_value=min_date,
-    max_value=max_date
-)
-
-categories = sorted(
-    df["category_name_1"].dropna().unique()
+    max_value=max_date,
+    key="date_range"
 )
 
 selected_categories = st.sidebar.multiselect(
     "Product Categories",
     categories,
-    default=categories
-)
-
-payments = sorted(
-    df["payment_method"].dropna().unique()
+    key="selected_categories"
 )
 
 selected_payments = st.sidebar.multiselect(
     "Payment Methods",
     payments,
-    default=payments
+    key="selected_payments"
 )
 
 st.sidebar.divider()
 
-if st.sidebar.button("Reset All Filters", use_container_width=True):
-    st.rerun()
+st.sidebar.button(
+    "Reset All Filters",
+    width="stretch",
+    on_click=reset_filters
+)
 
 
 # ==========================================
 # 6. FILTER DATA
 # ==========================================
 
-filtered_df = df.copy()
+mask = (
+    df["category_name_1"].isin(selected_categories) &
+    df["payment_method"].isin(selected_payments)
+)
 
-if len(date_range) == 2:
+if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
 
     start_date, end_date = date_range
 
-    filtered_df = filtered_df[
-        (filtered_df["created_at"].dt.date >= start_date) &
-        (filtered_df["created_at"].dt.date <= end_date)
-    ]
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
 
-filtered_df = filtered_df[
-    filtered_df["category_name_1"].isin(selected_categories)
-]
+    mask &= (df["created_at"] >= start_ts) & (df["created_at"] < end_ts)
 
-filtered_df = filtered_df[
-    filtered_df["payment_method"].isin(selected_payments)
-]
+filtered_df = df[mask]
 
 if filtered_df.empty:
     st.warning("No data available for selected filters.")
@@ -317,22 +331,17 @@ st.divider()
 # 9. PREPARE CHART DATA
 # ==========================================
 
-monthly_data = filtered_df.copy()
-
-monthly_data["Month"] = (
-    monthly_data["created_at"]
-    .dt.to_period("M")
-    .astype(str)
-)
-
 monthly_data = (
-    monthly_data.groupby("Month")["item_total_value"]
+    filtered_df.dropna(subset=["created_at"])
+    .assign(Month=lambda d: d["created_at"].dt.to_period("M").astype(str))
+    .groupby("Month")["item_total_value"]
     .sum()
     .reset_index()
+    .sort_values("Month")
 )
 
 category_data = (
-    filtered_df.groupby("category_name_1")["item_total_value"]
+    filtered_df.groupby("category_name_1", observed=True)["item_total_value"]
     .sum()
     .reset_index()
     .sort_values("item_total_value", ascending=True)
@@ -353,7 +362,7 @@ product_data = (
 )
 
 payment_data = (
-    filtered_df.groupby("payment_method")["increment_id"]
+    filtered_df.groupby("payment_method", observed=True)["increment_id"]
     .nunique()
     .reset_index(name="Total Orders")
     .sort_values("Total Orders", ascending=False)
@@ -361,7 +370,7 @@ payment_data = (
 )
 
 status_data = (
-    filtered_df.groupby("status")["increment_id"]
+    filtered_df.groupby("status", observed=True)["increment_id"]
     .nunique()
     .reset_index(name="Unique Orders")
     .sort_values("Unique Orders", ascending=False)
@@ -416,7 +425,7 @@ with tab1:
         showlegend=False
     )
 
-    st.plotly_chart(fig_monthly, use_container_width=True)
+    st.plotly_chart(fig_monthly, width="stretch")
 
     st.markdown(
         '<p class="section-title">Category Performance</p>',
@@ -442,9 +451,7 @@ with tab1:
         showlegend=False
     )
 
-    st.plotly_chart(fig_category, use_container_width=True)
-
-
+    st.plotly_chart(fig_category, width="stretch")
 
     # ==========================================
     # EXECUTIVE BUSINESS INSIGHTS
@@ -457,61 +464,61 @@ with tab1:
         unsafe_allow_html=True
     )
 
-    # Highest performing category
-    best_category = category_data.sort_values(
-        "item_total_value", ascending=False
-    ).iloc[0]
+    if monthly_data.empty or category_data.empty \
+            or payment_data.empty or status_data.empty:
 
-    # Highest recorded value month
-    peak_month = monthly_data.loc[
-        monthly_data["item_total_value"].idxmax()
-    ]
+        st.info("Not enough data to calculate insights for the selected filters.")
 
-    # Most used payment method
-    popular_payment = payment_data.iloc[0]
+    else:
 
-    # Most common order status
-    common_status = status_data.sort_values(
-        "Unique Orders", ascending=False
-    ).iloc[0]
+        best_category = category_data.sort_values(
+            "item_total_value", ascending=False
+        ).iloc[0]
 
-    insight1, insight2 = st.columns(2)
+        peak_month = monthly_data.loc[
+            monthly_data["item_total_value"].idxmax()
+        ]
 
-    with insight1:
-        st.info(
-            f"**Top Category**\n\n"
-            f"{best_category['category_name_1']} has the highest "
-            f"recorded product value of "
-            f"{format_value(best_category['item_total_value'])}."
-        )
+        popular_payment = payment_data.iloc[0]
 
-        st.info(
-            f"**Peak Month**\n\n"
-            f"{peak_month['Month']} recorded the highest "
-            f"product value of "
-            f"{format_value(peak_month['item_total_value'])}."
-        )
+        common_status = status_data.iloc[0]
 
-    with insight2:
-        st.info(
-            f"**Popular Payment Method**\n\n"
-            f"{popular_payment['payment_method']} has the highest "
-            f"number of unique orders "
-            f"({popular_payment['Total Orders']:,})."
-        )
+        insight1, insight2 = st.columns(2)
 
-        st.info(
-            f"**Most Common Order Status**\n\n"
-            f"{common_status['status']} is the most frequent "
-            f"status, with {common_status['Unique Orders']:,} "
-            f"unique orders."
-        )
+        with insight1:
+            st.info(
+                f"**Top Category**\n\n"
+                f"{best_category['category_name_1']} has the highest "
+                f"recorded product value of "
+                f"{format_value(best_category['item_total_value'])}."
+            )
+
+            st.info(
+                f"**Peak Month**\n\n"
+                f"{peak_month['Month']} recorded the highest "
+                f"product value of "
+                f"{format_value(peak_month['item_total_value'])}."
+            )
+
+        with insight2:
+            st.info(
+                f"**Popular Payment Method**\n\n"
+                f"{popular_payment['payment_method']} has the highest "
+                f"number of unique orders "
+                f"({popular_payment['Total Orders']:,})."
+            )
+
+            st.info(
+                f"**Most Common Order Status**\n\n"
+                f"{common_status['status']} is the most frequent "
+                f"status, with {common_status['Unique Orders']:,} "
+                f"unique orders."
+            )
 
     st.caption(
         "Insights are dynamically calculated from the currently selected filters. "
         "Product value represents price × quantity, not verified revenue."
     )
-
 
 
 # ==========================================
@@ -545,7 +552,7 @@ with tab2:
         margin=dict(l=20, r=20, t=25, b=20)
     )
 
-    st.plotly_chart(fig_products, use_container_width=True)
+    st.plotly_chart(fig_products, width="stretch")
 
     st.markdown(
         '<p class="section-title">Category Value Distribution</p>',
@@ -563,16 +570,15 @@ with tab2:
 
     fig_pie.update_layout(height=450)
 
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.plotly_chart(fig_pie, width="stretch")
 
     st.markdown("### Product Performance Details")
 
     st.dataframe(
         product_data,
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )
-
 
 
 # ==========================================
@@ -583,7 +589,6 @@ with tab3:
 
     st.markdown("### Order Status Analysis")
 
-    # Focus on major business statuses
     important_statuses = [
         "complete",
         "canceled",
@@ -593,7 +598,7 @@ with tab3:
     ]
 
     important_status_data = status_data[
-        status_data["status"].isin(important_statuses)
+        status_data["status"].astype(str).str.lower().isin(important_statuses)
     ].sort_values("Unique Orders", ascending=True)
 
     left, right = st.columns(2)
@@ -622,10 +627,7 @@ with tab3:
             margin=dict(l=15, r=60, t=55, b=20)
         )
 
-        st.plotly_chart(
-            fig_status,
-            use_container_width=True
-        )
+        st.plotly_chart(fig_status, width="stretch")
 
     with right:
 
@@ -651,16 +653,13 @@ with tab3:
             margin=dict(l=15, r=60, t=55, b=20)
         )
 
-        st.plotly_chart(
-            fig_payment,
-            use_container_width=True
-        )
+        st.plotly_chart(fig_payment, width="stretch")
 
     st.markdown("### Complete Order Status Details")
 
     st.dataframe(
         status_data,
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )
 
@@ -668,10 +667,9 @@ with tab3:
 
     st.dataframe(
         payment_data,
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )
-
 
 
 # ==========================================
@@ -687,7 +685,7 @@ with tab4:
         placeholder="Enter product SKU..."
     )
 
-    table_df = filtered_df.copy()
+    table_df = filtered_df
 
     if search_text:
 
@@ -695,26 +693,34 @@ with tab4:
             table_df["sku"].astype(str).str.contains(
                 search_text,
                 case=False,
-                na=False
+                na=False,
+                regex=False
             )
         ]
 
-    st.write(f"Showing {len(table_df):,} records")
+    MAX_ROWS = 1000
 
+    st.write(
+        f"Total {len(table_df):,} records found "
+        f"(showing first {min(MAX_ROWS, len(table_df)):,})"
+    )
+
+    # Poora table browser mein bhejna bohat heavy hota hai, is liye sirf top rows
     st.dataframe(
-        table_df,
-        use_container_width=True,
+        table_df.head(MAX_ROWS),
+        width="stretch",
         hide_index=True
     )
 
-    csv_data = table_df.to_csv(index=False).encode("utf-8")
+    # CSV sirf tab banao jab user chahe (memory bachane ke liye)
+    if st.checkbox("Prepare full filtered dataset for download"):
 
-    st.download_button(
-        "📥 Download Filtered Dataset",
-        data=csv_data,
-        file_name="pakistan_ecommerce_filtered.csv",
-        mime="text/csv"
-    )
+        st.download_button(
+            "📥 Download Filtered Dataset",
+            data=to_csv_bytes(table_df),
+            file_name="pakistan_ecommerce_filtered.csv",
+            mime="text/csv"
+        )
 
 
 # ==========================================
