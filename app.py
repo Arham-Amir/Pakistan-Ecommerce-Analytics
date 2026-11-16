@@ -106,22 +106,28 @@ div[data-testid="stPlotlyChart"] {
 """, unsafe_allow_html=True)
 
 
+
 # ==========================================
 # 3. LOAD DATA
 # ==========================================
 
-
 @st.cache_data
 def load_data():
 
+    # Load compressed dataset from GitHub
     data = pd.read_csv(
         "pakistan_ecommerce_cleaned.csv.gz",
         compression="gzip",
-        low_memory=False
+        low_memory=False,
+        dtype={"increment_id": "string"}
     )
 
-    # Convert mixed data columns to text
-    data["increment_id"] = data["increment_id"].astype("string")
+    # Convert all mixed object columns into strings
+    # This prevents Streamlit / PyArrow conversion errors
+    object_columns = data.select_dtypes(include=["object"]).columns
+
+    for column in object_columns:
+        data[column] = data[column].astype("string")
 
     # Convert date column
     data["created_at"] = pd.to_datetime(
@@ -129,12 +135,23 @@ def load_data():
         errors="coerce"
     )
 
+    # Ensure important numeric columns are numeric
+    numeric_columns = [
+        "qty_ordered",
+        "item_total_value"
+    ]
+
+    for column in numeric_columns:
+        data[column] = pd.to_numeric(
+            data[column],
+            errors="coerce"
+        )
+
     return data
 
 
-
-
 df = load_data()
+
 
 
 # ==========================================
