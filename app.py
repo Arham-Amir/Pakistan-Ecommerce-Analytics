@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -152,10 +151,18 @@ def load_data():
             errors="coerce"
         )
 
+    # Khaali "Unnamed: xx" columns hata do
+    data = data.loc[:, ~data.columns.str.startswith("Unnamed")]
+
     # Numeric columns
-    for column in ["qty_ordered", "item_total_value"]:
+    for column in ["price", "qty_ordered", "item_total_value"]:
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")
+
+    # item_total_value CSV mein nahi hai, to price x quantity se bana lo
+    if "item_total_value" not in data.columns \
+            and {"price", "qty_ordered"}.issubset(data.columns):
+        data["item_total_value"] = data["price"] * data["qty_ordered"]
 
     # Memory bachane ke liye low-cardinality columns ko category bana do
     for column in ["status", "category_name_1", "payment_method"]:
