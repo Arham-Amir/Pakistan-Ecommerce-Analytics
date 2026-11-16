@@ -110,34 +110,28 @@ div[data-testid="stPlotlyChart"] {
 # 3. LOAD DATA
 # ==========================================
 
+
 @st.cache_data
 def load_data():
 
-    data = pd.read_csv("pakistan_ecommerce_cleaned.csv.gz", compression="gzip", low_memory=False)
+    data = pd.read_csv(
+        "pakistan_ecommerce_cleaned.csv.gz",
+        compression="gzip",
+        low_memory=False
+    )
 
+    # Convert mixed data columns to text
     data["increment_id"] = data["increment_id"].astype("string")
 
+    # Convert date column
     data["created_at"] = pd.to_datetime(
-        data["created_at"], errors="coerce"
-    )
-
-    data["price"] = pd.to_numeric(
-        data["price"], errors="coerce"
-    )
-
-    data["qty_ordered"] = pd.to_numeric(
-        data["qty_ordered"], errors="coerce"
-    )
-
-    data["discount_amount"] = pd.to_numeric(
-        data["discount_amount"], errors="coerce"
-    )
-
-    data["item_total_value"] = (
-        data["price"] * data["qty_ordered"]
+        data["created_at"],
+        errors="coerce"
     )
 
     return data
+
+
 
 
 df = load_data()
